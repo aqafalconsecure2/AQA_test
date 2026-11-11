@@ -1,0 +1,176 @@
+import logging
+import os
+import time
+import sys
+import pyautogui
+import random
+import win32gui
+import win32con
+
+from pathlib import Path
+
+from pathlib import Path
+from datetime import datetime
+
+from PyQt5.QtWidgets import QApplication
+from PyQt5.QtCore import QMimeData, QUrl
+
+from DatabaseReporter import DatabaseReporter
+from ReportFolder import ReportFolder
+
+
+# ===================== НАСТРОЙКИ =====================
+
+# Переменные БД (через ENV безопаснее)
+DB_HOST = os.getenv("DB_HOST", "192.168.6.169")
+DB_PORT = os.getenv("DB_PORT", "5432")
+DB_USER = os.getenv("DB_USER", "postgres")
+DB_PASS = os.getenv("DB_PASS", "1234")
+DB_NAME = os.getenv("DB_NAME", "test_03_04")
+
+# ===================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====================
+
+def create_test_file(
+    folder: str,
+    prefix: str = "TestFile",
+    extension: str = ".txt",
+    size_bytes: int = 1024
+):
+    Path(folder).mkdir(parents=True, exist_ok=True)
+
+    filename = (
+        f"{prefix}_"
+        f"{datetime.now():%Y%m%d_%H%M%S}_"
+        f"{random.randint(1000, 9999)}"
+        f"{extension}"
+    )
+
+    file_path = Path(folder) / filename
+
+    with file_path.open("wb") as f:
+        f.write(os.urandom(size_bytes))
+
+    return filename
+
+def open_folder_focus(folder_path):
+    """
+    Открывает папку Windows Explorer и переводит окно в фокус.
+    """
+    folder = Path(folder_path)
+
+    if not folder.exists():
+        raise FileNotFoundError(f"Папка не найдена: {folder}")
+
+    os.startfile(folder)
+
+    time.sleep(1)  # ждём запуска проводника
+
+    folder_name = folder.name
+
+    def enum_windows(hwnd, result):
+        if win32gui.IsWindowVisible(hwnd):
+            title = win32gui.GetWindowText(hwnd)
+            if folder_name in title:
+                result.append(hwnd)
+
+    windows = []
+    win32gui.EnumWindows(enum_windows, windows)
+
+    if windows:
+        hwnd = windows[0]
+
+        # восстановить окно, если свернуто
+        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+
+        # установить фокус
+        win32gui.SetForegroundWindow(hwnd)
+
+def copy_file_to_clipboard(file_path):
+    if not os.path.isfile(file_path):
+        raise ValueError(f"Файл не найден: {file_path}")
+
+    app = QApplication.instance()
+    if not app:
+        app = QApplication(sys.argv)
+
+    mime_data = QMimeData()
+    file_url = QUrl.fromLocalFile(file_path)
+    mime_data.setUrls([file_url])
+
+    clipboard = app.clipboard()
+    clipboard.setMimeData(mime_data)
+
+    logging.info(f"Файл '{file_path}' скопирован в буфер обмена.")
+
+
+def send_file(file_path):
+    if not os.path.exists(file_path):
+        logging.error(f"Файл для отправки не найден: {file_path}")
+        return
+    try:
+        copy_file_to_clipboard(file_path)
+        time.sleep(1)
+        pyautogui.hotkey('ctrl', 'v')
+        time.sleep(1)
+        #pyautogui.press('enter')
+        logging.info(f"Файл '{file_path}' отправлен")
+    except Exception:
+        logging.exception(f"Ошибка при отправке файла '{file_path}'")
+
+def check_database(file_name):
+    try:
+        db = DatabaseReporter(DB_HOST, DB_PORT, DB_USER, DB_PASS, DB_NAME)
+        db.connect()
+
+        files = db.fetch_messages(
+            "SELECT usb_file_fname FROM usb_files LIMIT 100;"
+        )
+
+        if db.message_exists(files, f'{file_name}'):
+            logging.info('Файл найден в БД')
+        else:
+            logging.warning('Файл не найден в БД')
+
+        db.close()
+
+    except Exception:
+        logging.exception("Ошибка при работе с БД")
+
+def main():
+    logging.info("=== Запуск автоматизации ===")
+
+    try:
+         #0. Логирование
+        report = ReportFolder("C:/Reports/USB")
+        folder_path = report.create_folder()
+
+        #1. Открытие папки сетевой шары
+        open_folder_focus(r"\\192.168.1.99\it\IT_Falcongaze\STQA\USERS\n.korolko")
+        time.sleep(2)
+
+        # 5. Копирование пути к файлу
+        file_name = create_test_file(
+                    folder=r"C:\files",
+                    prefix="USB",
+                    extension=".pdf",
+                    size_bytes= 1 * 16 * 16
+                )
+        
+        FILE_TO_SEND = fr"C:\files\{file_name}"
+
+        # 6. Отправка файла
+        for file in [FILE_TO_SEND]:
+            send_file(file)
+        time.sleep(1)
+        
+        # 7. Проверка БД
+        check_database(file_name)
+
+        logging.info("=== Автоматизация завершена успешно ===")
+
+    except Exception:
+        logging.exception("Критическая ошибка в процессе выполнения")
+
+
+if __name__ == "__main__":
+    main()
