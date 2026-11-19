@@ -6,6 +6,11 @@ import pyautogui
 import glob
 import subprocess
 import psutil
+import pygetwindow as gw
+import random
+
+from pathlib import Path
+from datetime import datetime
 
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import QMimeData, QUrl
@@ -22,23 +27,27 @@ from ReportFolder import ReportFolder
 # ===================== НАСТРОЙКИ =====================
 
 # Переменные БД (через ENV безопаснее)
-DB_HOST = os.getenv("DB_HOST", "192.168.6.169")
+DB_HOST = os.getenv("DB_HOST", "192.168.6.152")
 DB_PORT = os.getenv("DB_PORT", "5432")
-DB_USER = os.getenv("DB_USER", "postgres")
-DB_PASS = os.getenv("DB_PASS", "1234")
-DB_NAME = os.getenv("DB_NAME", "test_03_04")
+DB_USER = os.getenv("DB_USER", "test")
+DB_PASS = os.getenv("DB_PASS", "123")
+DB_NAME = os.getenv("DB_NAME", "test_qa")
+
+DB_CHECK_TIMEOUT = 30 
+DB_CHECK_INTERVAL = 2  
 
 url = 'https://trk.mail.ru/c/h172vv5'
 MAX_INSTALLER_PATH = r"C:\Max.msi"
 MAX_EXE_PATH = r'C:\Program Files\MAX\max.exe'
 MAX_VERSION_FILE = r'C:\max_version.txt'
+MAX_CHAT_URL = "https://max.ru/u/f9LHodD0cOJasSoAkae2EochQGWT1nMXrbz8DhUBhvOXZtFyhkSFepTKryY"
 #FILE_TO_SEND1 = r"C:\files\Max.pdf"
 #FILE_TO_SEND2 = r"C:\files\file2.pdf"
 #FILE_TO_SEND3 = r"C:\files\file3.pdf"
 destination = MAX_INSTALLER_PATH
-name_mess = 'Ma_desk'
+name_mess = 'Max_desk'
 #install_args = ["/VERYSILENT"]
-
+message = (f"This is test {name_mess}")
 
 # ===================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====================
 def create_test_file(
@@ -69,32 +78,36 @@ def check_installer_exists(installer_path):
         return False
     return True
 
-def messeges_max():
+def activate_max_window(timeout=20):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        wins = [w for w in gw.getWindowsWithTitle("MAX") if w.visible]
+        if wins:
+            w = wins[0]
+            try:
+                if w.isMinimized:
+                    w.restore()
+                w.activate()
+                return True
+            except Exception:
+                logging.debug("Не удалось активировать окно, повтор", exc_info=True)
+        time.sleep(0.5)
+    return False
+
+def messages_max():
     logging.info(f"Начало автоматизации {name_mess}")
 
-    time.sleep(2)
-
-    search_field = pyautogui.locateCenterOnScreen('screens/max_icon.png', confidence=0.8)
-    if search_field:
-        pyautogui.click(search_field)
-        time.sleep(1)        
-        logging.info("Пользователь выбран")
-    else:
-        logging.error("Поле поиска не найдено на экране")
-        return
-
-    time.sleep(1)
+    time.sleep(1) 
+    os.startfile(MAX_CHAT_URL)   
+    time.sleep(4)
     
-    message_field = pyautogui.locateCenterOnScreen('screens/max_field.png', confidence=0.8)
-    if message_field:
-        pyautogui.click(message_field)
-        time.sleep(1)
-        message_sender = Messages(f"This is test {name_mess}")
-        message_sender.run(5)
-        logging.info("Сообщения отправлены")
-    else:
-        logging.error("Поле ввода сообщения не найдено")
-        return
+    if not activate_max_window():
+        raise RuntimeError("Окно Max не найдено после открытия ссылки")
+    
+    message_sender = Messages(message)
+    message_sender.run(3)
+
+    logging.info("Сообщения отправлены")
     
 def copy_file_to_clipboard(file_path):
     if not os.path.isfile(file_path):
@@ -128,35 +141,100 @@ def send_file(file_path):
         logging.exception(f"Ошибка при отправке файла '{file_path}'")
 
 
-def check_database(file_name):
+def wait_for_db_record(check, what, timeout=DB_CHECK_TIMEOUT, interval=DB_CHECK_INTERVAL):
+    """
+    Повторяет check() до первого True или до истечения timeout.
+    По таймауту бросает AssertionError.
+    """
+    deadline = time.monotonic() + timeout
+    attempt = 0
+ 
+    while True:
+        attempt += 1
+ 
+        if check():
+            logging.info("%s найдено в БД (попытка %d)", what, attempt)
+            return
+ 
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                f"{what} не найдено в БД за {timeout} с ({attempt} попыток)"
+            )
+ 
+        logging.info(
+            "%s ещё не в БД, повтор через %d с (попытка %d)",
+            what, interval, attempt
+        )
+        time.sleep(interval)
+
+
+def check_database(message=None, file_name=None):
+    if message is None and file_name is None:
+        raise ValueError(
+            "Необходимо передать message или file_name"
+        )
+
+    db = DatabaseReporter(
+        DB_HOST,
+        DB_PORT,
+        DB_USER,
+        DB_PASS,
+        DB_NAME
+    )
+
     try:
-        db = DatabaseReporter(DB_HOST, DB_PORT, DB_USER, DB_PASS, DB_NAME)
         db.connect()
 
-        # Проверка сообщений
-        messages = db.fetch_messages(
-            'SELECT conv_message_body FROM conv_messages LIMIT 500;'
-        )
+        # Проверка сообщения
+        if message is not None:
+            messages = db.fetch_messages(
+                """
+                SELECT conv_message_body
+                FROM conv_messages
+                WHERE conv_message_body LIKE %s
+                LIMIT 300;
+                """,
+                (f"%{message}%",)
+            )
 
-        if db.message_exists(messages, f"This is test {name_mess}"):
-            logging.info('Сообщение найдено в БД')
-        else:
-            logging.warning('Сообщение не найдено в БД')
+            if not db.message_exists(messages, message):
+                raise AssertionError(
+                    f"Сообщение не найдено в БД: {message}"
+                )
 
-        # Проверка файлов
-        files = db.fetch_messages(
-            "SELECT conv_file_fname FROM conv_files LIMIT 100;"
-        )
+            logging.info(
+                "Сообщение найдено в БД: %s", message
+            )
 
-        if db.message_exists(files, file_name):
-            logging.info('Файл найден в БД')
-        else:
-            logging.warning('Файл не найден в БД')
+        # Проверка файла
+        if file_name is not None:
+            files = db.fetch_messages(
+                """
+                SELECT conv_file_fname
+                FROM conv_files
+                WHERE conv_file_fname = %s
+                LIMIT 300;
+                """,
+                (file_name,)
+            )
 
-        db.close()
+            if not db.message_exists(files, file_name):
+                raise AssertionError(
+                    f"Файл не найден в БД: {file_name}"
+                )
+
+            logging.info(
+                "Файл найден в БД: %s", file_name
+            )
+
+        logging.info("Проверка БД успешно завершена")
 
     except Exception:
-        logging.exception("Ошибка при работе с БД")
+        logging.exception("Ошибка при проверке БД")
+        raise
+
+    finally:
+        db.close()
 
 def close_app_by_name(process_name):
     
@@ -221,35 +299,42 @@ def main():
         maxmes = StartApp(MAX_EXE_PATH)
         maxmes.run()
 
-        time.sleep(5)
+        time.sleep(10)
 
         # 5. Отправка сообщений
-        messeges_max()
+        messages_max()
 
         # 6. Отправка файла
         file_name = create_test_file(
                             folder=r"C:\files\Desktop_mess",
                             prefix="Max_desk",
                             extension=".pdf",
-                            size_bytes= 1 * 16 * 16
+                            size_bytes= 1 * 126 * 136
                         )
         FILE_TO_SEND = fr"C:\files\Desktop_mess\{file_name}"
 
         for file in [FILE_TO_SEND]:
             send_file(file)
-        time.sleep(2)
+        time.sleep(4)
         
         # 7. Проверка БД
-        check_database(file_name)
+        check_database(message, file_name)
 
-        # 8. Закрытие приложение
-        close_app_by_name("max.exe")
-
-        logging.info("=== Автоматизация завершена успешно ===")
+        ok = True
 
     except Exception:
         logging.exception("Критическая ошибка в процессе выполнения")
 
+    finally:
+        try:
+            close_app_by_name("max.exe")
+        except Exception:
+            logging.exception("Не удалось корректно закрыть Max.exe")
+ 
+        if ok:
+            logging.info("=== Автоматизация завершена успешно ===")
+        else:
+            logging.error("=== Автоматизация завершена с ошибкой ===")
 
 if __name__ == "__main__":
     main()

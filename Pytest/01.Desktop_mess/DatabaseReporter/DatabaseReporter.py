@@ -1,15 +1,17 @@
+
 import logging
 import psycopg2
 from psycopg2 import OperationalError
 
+
 class DatabaseReporter:
     def __init__(self, host, port, user, password, dbname):
         self.connection_params = {
-            'host': host,
-            'port': port,
-            'user': user,
-            'password': password,
-            'dbname': dbname
+            "host": host,
+            "port": port,
+            "user": user,
+            "password": password,
+            "dbname": dbname
         }
         self.conn = None
         self.cursor = None
@@ -18,31 +20,45 @@ class DatabaseReporter:
         try:
             self.conn = psycopg2.connect(**self.connection_params)
             self.cursor = self.conn.cursor()
-            logging.info('Подключение успешно!')
-        except OperationalError as e:
-            logging.error(f'Ошибка подключения: {e}', exc_info=True)
+            logging.info("Подключение к БД успешно!")
 
-    def fetch_messages(self, query):
+        except OperationalError:
+            logging.exception("Ошибка подключения к БД")
+            raise
+
+    def fetch_messages(self, query, params=None):
+        if self.cursor is None:
+            raise RuntimeError("Нет активного подключения к БД")
+
         try:
-            self.cursor.execute(query)
+            self.cursor.execute(query, params or ())
             results = self.cursor.fetchall()
-            #logging.info(f'Результаты запроса: {results}')
             return results
-        except Exception as e:
-            logging.error(f'Ошибка выполнения запроса: {e}', exc_info=True)
-            return []
+
+        except Exception:
+            logging.exception("Ошибка выполнения SQL-запроса")
+            raise
 
     def message_exists(self, results, message):
         if not results:
             return False
-        return any(message in row[0] for row in results)
+
+        return any(
+            row[0] is not None and message in str(row[0])
+            for row in results
+        )
 
     def close(self):
         try:
-            if self.cursor:
+            if self.cursor is not None:
                 self.cursor.close()
-            if self.conn:
+                self.cursor = None
+
+            if self.conn is not None:
                 self.conn.close()
-            logging.info('Соединение закрыто')
-        except Exception as e:
-            logging.error(f'Ошибка при закрытии соединения: {e}', exc_info=True)
+                self.conn = None
+
+            logging.info("Соединение с БД закрыто")
+
+        except Exception:
+            logging.exception("Ошибка при закрытии соединения")
